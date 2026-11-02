@@ -267,3 +267,179 @@ Each capability will be marked as complete only after implementation and verific
 ## 12. Repository
 
 GitHub: https://github.com/Outlaw-Gypsy/shopflow-devops-capstone
+
+----
+
+## Kubernetes Deployment and Hardening
+
+### 1. Kubernetes Deployment
+
+ShopFlow has been deployed to a local Kubernetes cluster using Minikube.
+
+The deployment runs in a dedicated Kubernetes namespace:
+
+- Namespace: `shopflow`
+- Cluster: Minikube
+- Container images: Locally built backend and frontend images
+- Image pull policy: `Never` (uses images already available in Minikube)
+
+The application is deployed using Kubernetes Deployments, Services, and a StatefulSet.
+
+#### Kubernetes workloads
+
+| Component | Kubernetes resource | Purpose |
+|---|---|---|
+| Frontend | Deployment + Service | Serves the ShopFlow web interface through Nginx |
+| Backend | Deployment + Service | Runs the Flask API |
+| PostgreSQL | StatefulSet + Service | Provides persistent relational database storage |
+| Redis | Deployment + Service | Provides application caching |
+
+PostgreSQL uses a PersistentVolumeClaim with a 1Gi storage request and `ReadWriteOnce` access mode.
+
+### 2. Configuration and Secrets
+
+Application configuration is separated from application workloads.
+
+- A ConfigMap stores non-sensitive configuration, including the PostgreSQL database name, database user and Redis connection URL.
+- A Kubernetes Secret stores the PostgreSQL password.
+- The backend retrieves its database password from the Secret rather than embedding the credential directly in the Deployment manifest.
+- The local `.env` file is excluded through `.gitignore` and is not tracked by Git.
+
+The database connection uses the PostgreSQL driver configured in the backend application.
+
+### 3. Health Checks and Resource Management
+
+Kubernetes probes are configured to monitor application health.
+
+**Backend**
+- Liveness probe: `/health`
+- Readiness probe: `/ready`
+
+The readiness endpoint checks connectivity to PostgreSQL and Redis.
+
+**Frontend**
+- Liveness probe: `/`
+- Readiness probe: `/`
+
+CPU and memory requests and limits are configured for the application workloads.
+
+| Workload | CPU request | CPU limit | Memory request | Memory limit |
+|---|---:|---:|---:|---:|
+| Backend | 100m | 500m | 128Mi | 512Mi |
+| Frontend | 50m | 250m | 32Mi | 128Mi |
+| PostgreSQL | 100m | 500m | 128Mi | 512Mi |
+| Redis | 50m | 250m | 64Mi | 256Mi |
+
+### 4. Autoscaling and Availability
+
+A Horizontal Pod Autoscaler (HPA) is configured for the backend.
+
+- Minimum replicas: 1
+- Maximum replicas: 3
+- CPU utilization target: 70%
+- Scaling metric: CPU utilization
+
+A PodDisruptionBudget (PDB) is also configured for the backend with `minAvailable: 1`.
+
+This ensures Kubernetes should maintain at least one available backend Pod during voluntary disruptions when the disruption budget permits it. With only one replica running, the current allowed voluntary disruptions are zero.
+
+### 5. Container Security Hardening
+
+The backend container runs with a non-root security configuration.
+
+The following controls have been configured and verified:
+
+- `runAsNonRoot: true`
+- User ID: 1000
+- Group ID: 1000
+- `allowPrivilegeEscalation: false`
+- All Linux capabilities dropped.
+- Seccomp profile set to `RuntimeDefault`.
+
+The running backend container was inspected and confirmed to execute as UID 1000 rather than root.
+
+### 6. Database Initialization
+
+The Kubernetes PostgreSQL instance initially had no application tables. Although the backend could connect to PostgreSQL and pass its readiness check, product API requests returned HTTP 500 because the `product` table did not exist.
+
+The issue was resolved using the existing Flask CLI commands:
+
+```bash
+kubectl exec -n shopflow deployment/backend -- flask --app app init-db
+kubectl exec -n shopflow deployment/backend -- flask --app app seed
+```
+
+The database was initialized and populated with three sample products:
+
+- Mechanical Keyboard
+- Wireless Mouse
+- USB-C Hub
+
+The existing PostgreSQL persistent volume was preserved throughout the process.
+
+### 7. Kubernetes Application Verification
+
+The application was tested through the frontend Kubernetes Service using port-forwarding.
+
+| Test | Expected result | Observed result |
+|---|---|---|
+| `GET /health` | HTTP 200 | HTTP 200 |
+| `GET /ready` | HTTP 200 | HTTP 200 |
+| `GET /api/products` | HTTP 200 | HTTP 200 |
+| `POST /api/orders` | HTTP 201 | HTTP 201 |
+
+An order was successfully created for one Mechanical Keyboard:
+
+- Order ID: 1
+- Product ID: 1
+- Quantity: 1
+- Total: 75,000
+- Status: confirmed
+
+PostgreSQL was queried directly to verify that the order persisted and the product stock decreased from 25 to 24.
+
+### 8. Pod Recovery Test
+
+A controlled recovery test was performed by manually deleting the running backend Pod.
+
+**Test procedure:**
+
+1. Identified the active backend Pod.
+2. Deleted the Pod using `kubectl delete pod`.
+3. Observed the Kubernetes Deployment controller create a replacement Pod.
+4. Waited for the replacement Pod to reach `1/1 Running`.
+5. Verified the Deployment rollout completed successfully.
+6. Confirmed the backend Service had a healthy endpoint.
+7. Repeated application health, readiness and product API requests.
+
+**Observed result:**
+
+- The replacement backend Pod became Ready.
+- The Deployment successfully rolled out.
+- The backend Service exposed the replacement Pod as an endpoint.
+- Health and readiness checks returned HTTP 200.
+- Product retrieval returned HTTP 200.
+- Previously persisted inventory data remained intact.
+
+This demonstrated Kubernetes Deployment self-healing following the deletion of an application Pod, while PostgreSQL data remained persistent.
+
+### 9. Current Kubernetes Scope
+
+The following capabilities have been implemented and verified:
+
+- [x] Dedicated Kubernetes namespace
+- [x] Frontend and backend Deployments
+- [x] Kubernetes Services
+- [x] PostgreSQL StatefulSet and persistent storage
+- [x] Redis Deployment
+- [x] ConfigMap and Secret
+- [x] Liveness and readiness probes
+- [x] CPU and memory requests and limits
+- [x] Backend Horizontal Pod Autoscaler
+- [x] Backend PodDisruptionBudget
+- [x] Non-root container execution and security hardening
+- [x] End-to-end application verification
+- [x] Database persistence verification
+- [x] Backend Pod recovery test
+
+Monitoring, centralized logging, GitOps with Argo CD, deployment strategies and additional failure-injection tests remain part of the subsequent implementation stages.
